@@ -234,6 +234,7 @@ import {
   type DaemonAuthConfig,
 } from "./auth.js";
 import { deleteLocalCredential, writeLocalCredential } from "./local-credential.js";
+import { createKeycloakOidcRuntime } from "./keycloak-oidc.js";
 import { createWebUiMiddleware } from "./web-ui.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
 import { createGitMutationService } from "./session/git-mutation/git-mutation-service.js";
@@ -557,6 +558,34 @@ async function reconcileManagedProcessLedger(
   }
 }
 
+async function mountKeycloakOidc(
+  app: express.Application,
+  config: PaseoDaemonConfig,
+  logger: Logger,
+) {
+  if (!config.auth?.oidc) return undefined;
+  if (!config.auth.password) {
+    throw new Error(
+      "Keycloak OIDC requires a daemon password for CLI and local credential fallback",
+    );
+  }
+  const runtime = await createKeycloakOidcRuntime({
+    config: config.auth.oidc,
+    paseoHome: config.paseoHome,
+    logger,
+  });
+  app.get("/auth", runtime.handleAuthStart);
+  app.get("/oauth2/callback", runtime.handleAuthCallback);
+  app.get("/logout", runtime.handleLogout);
+  app.use(runtime.guard);
+  logger.info({ issuer: runtime.config.issuer }, "Keycloak OIDC enabled");
+  return runtime;
+}
+
+function isAuthRequired(auth: DaemonAuthConfig | undefined): boolean {
+  return Boolean(auth?.password || auth?.oidc);
+}
+
 function mountWebUi(app: express.Application, config: PaseoDaemonConfig, logger: Logger): void {
   app.use(
     createWebUiMiddleware({
@@ -843,10 +872,10 @@ export async function createPaseoDaemon(
     createTerminalActivityRouteHandler(terminalManager),
   );
 
-  // Serve the bundled browser web UI when enabled. Mounted after service-proxy
-  // classification and host/CORS handling, but before daemon bearer auth, so
-  // static app files load without the daemon password while API/WebSocket calls
-  // remain protected.
+  const keycloakOidc = await mountKeycloakOidc(app, config, logger);
+
+  // The OIDC guard protects the bundled UI as well as API routes. Without it,
+  // static app files stay public by design so the daemon password login can render.
   mountWebUi(app, config, logger);
 
   let localCredential: string | null = null;
@@ -1860,7 +1889,7 @@ export async function createPaseoDaemon(
                 {
                   host: boundListenTarget.host,
                   port: boundListenTarget.port,
-                  authRequired: !!config.auth?.password,
+                  authRequired: isAuthRequired(config.auth),
                   elapsed: elapsed(),
                 },
                 `Server listening on http://${boundListenTarget.host}:${boundListenTarget.port}`,
@@ -1869,7 +1898,7 @@ export async function createPaseoDaemon(
               logger.info(
                 {
                   path: boundListenTarget.path,
-                  authRequired: !!config.auth?.password,
+                  authRequired: isAuthRequired(config.auth),
                   elapsed: elapsed(),
                 },
                 `Server listening on ${boundListenTarget.path}`,
@@ -1878,7 +1907,6 @@ export async function createPaseoDaemon(
             if (config.auth?.password) {
               logger.info("Daemon password authentication enabled");
             }
-
             wsServer = new VoiceAssistantWebSocketServer(
               httpServer,
               logger,
@@ -1895,6 +1923,7 @@ export async function createPaseoDaemon(
                 daemonStatusRpc: dependencies.serverFeatureOverrides?.daemonStatusRpc,
                 relayConfig: dependencies.serverFeatureOverrides?.relayConfig,
                 startPaused: true,
+                oidc: keycloakOidc,
               },
               workspaceAutoName,
               workspaceRuntimeStore,

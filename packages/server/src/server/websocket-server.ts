@@ -120,6 +120,7 @@ import {
   type DaemonAuthConfig,
 } from "./auth.js";
 import { resolveSessionAdmission } from "./session-admission-auth.js";
+import type { KeycloakOidcRuntime } from "./keycloak-oidc.js";
 import {
   WebSocketRuntimeMetricsWindow,
   type WebSocketRuntimeCounters,
@@ -198,6 +199,7 @@ interface WebSocketServerConfig {
   daemonStatusRpc?: boolean;
   relayConfig?: boolean;
   startPaused?: boolean;
+  oidc?: KeycloakOidcRuntime;
 }
 
 type WebSocketRuntimeMetrics = SessionRuntimeMetrics & CheckoutDiffMetrics;
@@ -602,6 +604,7 @@ export class VoiceAssistantWebSocketServer {
   }
   private readonly passwordHash: string | undefined;
   private readonly credentialSource: DaemonAuthConfig | undefined;
+  private readonly oidc: KeycloakOidcRuntime | undefined;
   private readonly worktreesRoot: string | undefined;
   private readonly daemonConfigStore: DaemonConfigStore;
   private readonly pushNotifications: PushNotifications;
@@ -731,6 +734,7 @@ export class VoiceAssistantWebSocketServer {
     }
     this.daemonVersion = daemonVersion.trim();
     this.credentialSource = auth;
+    this.oidc = wsConfig.oidc;
     this.daemonRuntimeConfig = daemonRuntimeConfig;
     this.browserToolsBroker = browserToolsBroker ?? null;
     this.hubRelationships = hubRelationships ?? null;
@@ -1036,7 +1040,8 @@ export class VoiceAssistantWebSocketServer {
       const token =
         extractHttpBearerToken(request.headers.authorization) ?? extractWsBearerToken(protocol);
       const hasHeaderCredential = token !== null;
-      if (password && hasHeaderCredential) {
+      const oidcPrincipal = await this.oidc?.authenticate(request);
+      if (password && hasHeaderCredential && !oidcPrincipal) {
         const requestMetadata = extractSocketRequestMetadata(request);
         const isAuthorized = await isBearerTokenValidAsync({ password, token });
         if (!isAuthorized) {
@@ -1049,13 +1054,17 @@ export class VoiceAssistantWebSocketServer {
           return;
         }
       }
+      if (this.oidc && !password && !oidcPrincipal) {
+        ws.close(WS_CLOSE_DAEMON_AUTH_FAILED, "OIDC session required");
+        return;
+      }
 
       await this.attachSocket(
         ws,
         request,
         undefined,
         false,
-        hasHeaderCredential ? OWNER_SESSION_ADMISSION : null,
+        hasHeaderCredential || oidcPrincipal ? OWNER_SESSION_ADMISSION : null,
       );
     } finally {
       ws.resume();

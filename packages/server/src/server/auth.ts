@@ -1,12 +1,14 @@
 import { compare, hashSync } from "bcryptjs";
 import { timingSafeEqual } from "node:crypto";
 import type { RequestHandler } from "express";
+import type { KeycloakOidcConfig, KeycloakOidcRequest } from "./keycloak-oidc.js";
 import { matchesLocalCredential } from "./local-credential.js";
 
 export const DAEMON_PASSWORD_BCRYPT_COST = 12;
 
 export interface DaemonAuthConfig {
   password?: string;
+  oidc?: KeycloakOidcConfig;
   localCredential?: () => string | null;
 }
 
@@ -80,7 +82,15 @@ export function createRequireBearerMiddleware(
 ): RequestHandler {
   const password = auth?.password;
   return (req, res, next) => {
-    if (!password || shouldBypassBearerAuth(req.method, req.path)) {
+    if (shouldBypassBearerAuth(req.method, req.path)) {
+      next();
+      return;
+    }
+    if ((req as KeycloakOidcRequest).oidcPrincipal) {
+      next();
+      return;
+    }
+    if (!password && !auth?.oidc) {
       next();
       return;
     }
@@ -94,7 +104,8 @@ export function createRequireBearerMiddleware(
           localCredential !== undefined &&
           token !== null &&
           matchesLocalCredential(localCredential, token);
-        if (!isLocal && !(await isBearerTokenValidAsync({ password, token }))) {
+        const validBearer = password ? await isBearerTokenValidAsync({ password, token }) : false;
+        if (!isLocal && !validBearer) {
           onReject?.({
             path: req.path,
             method: req.method,

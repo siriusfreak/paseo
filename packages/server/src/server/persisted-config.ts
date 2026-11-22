@@ -81,6 +81,18 @@ const BcryptHashSchema = z.string().regex(/^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/
 const DaemonAuthSchema = z
   .object({
     password: BcryptHashSchema.optional(),
+    oidc: z
+      .object({
+        issuer: z.url(),
+        clientId: z.string().min(1),
+        redirectUrl: z.url(),
+        requiredRole: z.string().min(1).optional(),
+        cookieName: z.string().min(1).optional(),
+        cookieDomain: z.string().min(1).optional(),
+        cookieSecure: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
