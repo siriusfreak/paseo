@@ -287,6 +287,13 @@ export async function createKeycloakOidcRuntime(input: {
         });
         res.redirect(`${document.authorization_endpoint}?${query}`);
       } catch (error) {
+        input.logger.error(
+          {
+            err: error,
+            cause: error instanceof Error && "cause" in error ? error.cause : undefined,
+          },
+          "OIDC authorization start failed",
+        );
         next(error);
       }
     })();
