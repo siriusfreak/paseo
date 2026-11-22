@@ -39,6 +39,32 @@ describe("daemon auth config", () => {
     ).toBe(true);
   });
 
+  test("loads Keycloak OIDC settings from the daemon environment", async () => {
+    const paseoHome = await createPaseoHome({ version: 1 });
+
+    const config = loadConfig(paseoHome, {
+      env: {
+        PASEO_OIDC_ISSUER: "https://keycloak.example/auth/realms/master",
+        PASEO_OIDC_CLIENT_ID: "paseo",
+        PASEO_OIDC_REDIRECT_URL: "https://paseo.example/oauth2/callback",
+        PASEO_OIDC_REQUIRED_ROLE: "opencode",
+        PASEO_OIDC_COOKIE_NAME: "paseo_session",
+        PASEO_OIDC_COOKIE_DOMAIN: "paseo.example",
+        PASEO_OIDC_COOKIE_SECURE: "true",
+      },
+    });
+
+    expect(config.auth?.oidc).toEqual({
+      issuer: "https://keycloak.example/auth/realms/master",
+      clientId: "paseo",
+      redirectUrl: "https://paseo.example/oauth2/callback",
+      requiredRole: "opencode",
+      cookieName: "paseo_session",
+      cookieDomain: "paseo.example",
+      cookieSecure: true,
+    });
+  });
+
   test("lets PASEO_PASSWORD override config.json auth password hash", async () => {
     const paseoHome = await createPaseoHome({
       version: 1,
