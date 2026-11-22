@@ -1,9 +1,12 @@
 import { createHash, randomBytes } from "node:crypto";
+import dns from "node:dns";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
+import { isIP, type LookupFunction } from "node:net";
 import path from "node:path";
 import type { Request, RequestHandler, Response } from "express";
-import { createRemoteJWKSet, jwtVerify, SignJWT, type JWTPayload } from "jose";
+import { Agent as UndiciAgent } from "undici";
+import { createRemoteJWKSet, customFetch, jwtVerify, SignJWT, type JWTPayload } from "jose";
 import type { Logger } from "pino";
 import { shouldBypassBearerAuth } from "./auth.js";
 
@@ -50,6 +53,46 @@ export interface KeycloakOidcRuntime {
 
 const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
 const STATE_TTL_SECONDS = 10 * 60;
+
+type OidcRequestInit = RequestInit & { dispatcher?: UndiciAgent };
+
+function createOidcLookup(): LookupFunction {
+  const server = process.env.PASEO_OIDC_DNS_SERVER?.trim();
+  if (server) dns.setServers([server]);
+  return (hostname, options, callback) => {
+    if (isIP(hostname)) {
+      callback(null, hostname);
+      return;
+    }
+    const resolve = options.family === 6 ? dns.resolve6 : dns.resolve4;
+    resolve(hostname, (error, addresses) => {
+      if (error) {
+        if (options.all) {
+          callback(error, []);
+        } else {
+          callback(error, "");
+        }
+      } else if (options.all) {
+        const family = options.family === 6 ? 6 : 4;
+        callback(
+          null,
+          addresses.map((address) => ({ address, family })),
+        );
+      } else {
+        callback(null, addresses[0]);
+      }
+    });
+  };
+}
+
+function createOidcDispatcher(): UndiciAgent {
+  return new UndiciAgent({ connect: { lookup: createOidcLookup() } });
+}
+
+function oidcFetch(dispatcher: UndiciAgent, url: string | URL, init: OidcRequestInit = {}) {
+  const requestInit = { ...init, dispatcher } as RequestInit;
+  return fetch(url, requestInit);
+}
 
 function base64url(value: Buffer): string {
   return value.toString("base64url");
@@ -146,19 +189,22 @@ export async function createKeycloakOidcRuntime(input: {
     issuer: normalizeIssuer(input.config.issuer),
   };
   const sessionKey = await loadOrCreateSessionKey(input.paseoHome);
+  const dispatcher = createOidcDispatcher();
   let discoveryPromise: Promise<DiscoveryDocument> | null = null;
   let keySet: ReturnType<typeof createRemoteJWKSet> | null = null;
 
   async function discovery(): Promise<DiscoveryDocument> {
     discoveryPromise ??= (async () => {
       const url = `${config.issuer}/.well-known/openid-configuration`;
-      const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+      const response = await oidcFetch(dispatcher, url, { signal: AbortSignal.timeout(10_000) });
       if (!response.ok) throw new Error(`OIDC discovery returned ${response.status}`);
       const document = (await response.json()) as DiscoveryDocument;
       if (normalizeIssuer(document.issuer) !== config.issuer) {
         throw new Error("OIDC discovery issuer does not match the configured issuer");
       }
-      keySet = createRemoteJWKSet(new URL(document.jwks_uri));
+      keySet = createRemoteJWKSet(new URL(document.jwks_uri), {
+        [customFetch]: async (jwksUrl, options) => oidcFetch(dispatcher, jwksUrl, options),
+      });
       return document;
     })();
     try {
@@ -269,7 +315,7 @@ export async function createKeycloakOidcRuntime(input: {
           return;
         }
         const document = await discovery();
-        const tokenResponse = await fetch(document.token_endpoint, {
+        const tokenResponse = await oidcFetch(dispatcher, document.token_endpoint, {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({
